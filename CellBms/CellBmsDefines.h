@@ -1,0 +1,34 @@
+/*
+ * CellBmsDefines.h
+ *
+ *  Created on: Jul 6, 2013
+ *      Author: Mark
+ */
+
+#ifndef CELLBMSDEFINES_H_
+#define CELLBMSDEFINES_H_
+
+#define YELLOW_BIT	BIT4
+#define GREEN_BIT 	BIT6
+#define RED_BIT 	BIT3
+
+#define YELLOW_PORT P2OUT
+#define GREEN_PORT 	P2OUT
+#define RED_PORT 	P2OUT
+
+#define YELLOW_ON	YELLOW_PORT &= ~YELLOW_BIT
+#define GREEN_ON	GREEN_PORT &= ~GREEN_BIT
+#define RED_ON		RED_PORT &= ~RED_BIT
+
+#define YELLOW_OFF	YELLOW_PORT |= YELLOW_BIT
+#define GREEN_OFF	GREEN_PORT |= GREEN_BIT
+#define RED_OFF		RED_PORT |= RED_BIT
+
+#define YELLOW_TOGGLE	YELLOW_PORT ^= YELLOW_BIT
+#define GREEN_TOGGLE	GREEN_PORT ^= GREEN_BIT
+#define RED_TOGGLE		RED_PORT ^= RED_BIT
+
+#define BATT_ANALOG			INCH_0
+#define NTC_ANALOG			INCH_1
+
+#endif /* CELLBMSDEFINES_H_ */
