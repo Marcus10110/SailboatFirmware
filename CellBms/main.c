@@ -60,15 +60,18 @@ int main(void)
     CCR0 = 8000;
     TACTL = TASSEL_2 + MC_1 + ID_0;  //TASSEL_2=SMCLK, MC_1=Up mode: the timer counts up to TACCR0, ID_0=div by 1
 
+    RED_OFF;
+    YELLOW_OFF;
+    GREEN_OFF;
+
+    RED_ON;
+
     InitI2C( 0x60 );
     InitAdcCell( BIT0 | BIT1 ); //VBATT and NTC
 
     SetDac(0); //full scale range is 0 to 2.5V, 10 bit (1024)
 
     RED_OFF;
-    YELLOW_OFF;
-    GREEN_OFF;
-
 
     __bis_SR_register( GIE );
 
@@ -200,7 +203,7 @@ void ProcessCommand()
 		{
 			batt_voltage = GetBattVoltage();
 
-			if( batt_voltage < 715 )  //about 2.8V
+			if( ( batt_voltage < CELL_MIN_VOLTAGE ) || ( batt_voltage > CELL_MAX_VOLTAGE ) )  //about 2.8V
 				ConditionCritical |= CONDITION_CRITICAL_VOLTAGE;
 			else
 				ConditionCritical &= ~CONDITION_CRITICAL_VOLTAGE;

@@ -121,7 +121,7 @@ bool StartReadData(bool up)
 
 #ifdef __MSP430F2272__
 	//use pin interrupt to sync timer.
-	P1OUT ^= BIT4; //indicate that we've started looking for the edge ISR. (it toggles in the ISR too.)
+	//P1OUT ^= BIT4; //indicate that we've started looking for the edge ISR. (it toggles in the ISR too.)
 	IsrPending = TRUE;
 	P1IFG = 0;
 	_NOP();
@@ -272,7 +272,7 @@ void TimerEventBmsSerial()
 	else if( CurrentState == BMS_RX_UP || CurrentState == BMS_RX_DOWN)
 	{
 		U8 sample;
-		P1OUT ^= BIT6;
+		//P1OUT ^= BIT6;
 		if( CurrentState == BMS_RX_UP )
 			sample = READ_RX_UP;
 		else

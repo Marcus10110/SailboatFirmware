@@ -558,15 +558,15 @@ __interrupt void Timer_B (void)
 		Ms++;
 	}
 
-	//if( (Ms > 0) && (Ms < 50))
-		//GREEN_ON;
-	//else
-		//GREEN_OFF;
+	if( (Ms > 0) && (Ms < 50))
+		GREEN_ON;
+	else
+		GREEN_OFF;
 
 
 	if( CriticalConditionFlags != 0 )
 	{
-		//RED_ON;
+		RED_ON;
 		if( ( (Seconds & 0x00000001) == 0) && ( WriteData.DisableBuzzer != TRUE ) ) //(use != true in case of data corruption)
 		{
 			BUZZ_TOGGLE;
@@ -578,7 +578,7 @@ __interrupt void Timer_B (void)
 	}
 	else
 	{
-		//RED_OFF;
+		RED_OFF;
 	}
 
 
@@ -616,7 +616,6 @@ __interrupt void USCI0RX_ISR(void)
 	U8 value = UCA0RXBUF;
 	U8 i;
 	U8* write_data_cast;
-	YELLOW_TOGGLE;
 	//DISABLE_RX_INTERRUPT();
 	_enable_interrupts();
 	_nop();
@@ -655,7 +654,6 @@ __interrupt void USCI0RX_ISR(void)
 		PcIdlePeriodCounterS = 0;
 
 exit_serial_isr:
-YELLOW_TOGGLE;
 	//_disable_interrupts();
 	_nop();
 
@@ -666,7 +664,6 @@ YELLOW_TOGGLE;
 #pragma vector=PORT1_VECTOR
 __interrupt void PORT1_ISR(void)
 {
-	RED_TOGGLE;
 
 	EdgeEventIsr();
 
