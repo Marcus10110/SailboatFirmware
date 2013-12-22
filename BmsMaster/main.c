@@ -3,41 +3,66 @@
 #include "../BoatMotorController/BoatPeripherals.h"
 #include "BmsMasterDefines.h"
 #include "../CellBms/BmsSerial.h"
+#include "../CellBms/BmsSharedDefines.h"
 /*
  * main.c
  */
 //MSP430F2272
 
+typedef struct //about 83 bytes.
+{
+	U16 CellVoltages[CELL_COUNT];
+	U16 CellTemperatures[ CELL_COUNT ];
 
-//5 relays.
-//2 current sense inputs
-//temp
-//humidity
-//tx/rx up
-//3 LEDs
-//buzzer
+	U16 PrechargeVoltages[RELAY_COUNT];
+	U16 MasterCurrent;
+	U16 ChargeCurrent;
+	U16 PackVoltage;
+	U16 MasterTemperature;
+	U16 MasterHumidity;
+	U16 ValidCellReadCount;
+	U8	CriticalFlags;
+} ReadDataStruct;
 
-U16 RelayAdcValueNeeded = 0;
-U16 RelayPreChargeTimeoutMs = 0;
-U16 RelayPreChargeTimerMs = 0;
-bool RelayPreChargeActive = FALSE;
-U8 RelayId = 0;
+typedef struct //about 42 bytes.
+{
+	U16 CellCurrents[CELL_COUNT];
+	bool	RelayStates[RELAY_COUNT];
+	bool	RelayPrechargeStates[RELAY_COUNT];
+	bool	DisableBuzzer;
+	bool 	padding;
+} WriteDataStruct;
+
+ReadDataStruct ReadData;
+WriteDataStruct WriteData;
 
 U8 BmsTxData[6];
-bool RelayStates[5];
 
 extern U8 Buffer[MAX_TX_LENGTH];
 extern U16 RxPacketSize;
 
 U16 WatchDogCounterS = 0;
 bool BmsAbortWatchdog = FALSE;
+U16 IdlePeriodCounterS = 0;
+U16 PcIdlePeriodCounterS = 0;
+U8 CriticalConditionFlags = 0;
 
-bool TxNextBmsMessage = FALSE;
+void InitStructs( ReadDataStruct* read_data, WriteDataStruct* write_data );
+void MainUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data );
+void LocalUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data );
+void CheckForCriticalConditions( ReadDataStruct* read_data );
 
+U16 GetCellVoltage( U8 cell_id );
+U16 GetCellTemperature( U8 cell_id );
+void SetCellCurrent( U8 cell_id, U16 current );
+U16 GetPrechargeVoltage( U8 relay_id );
 U16 GetHumidity();
 U16 GetTemp();
 U16 GetPackVoltage();
-bool SetRelay(U8 relay_id, bool on, bool use_precharge, U16 needed_adc_value, U16 timeout_ms);
+U16 GetCurrent( U8 id );
+void SetRelay( WriteDataStruct* write_data );
+void SetPrecharge( WriteDataStruct* write_data );
+void DelayMs(U16 ms);
 
 int main(void) {
 	//U16 adc_test = 0;
@@ -49,18 +74,14 @@ int main(void) {
     DCOCTL = CALDCO_8MHZ,
     BCSCTL1 = CALBC1_8MHZ;
 
-    P2SEL &= ~RELAY_5; //switch 2.7 into a IO rather than XOUT
+    P2SEL &= ~RELAY_1; //switch 2.7 into a IO rather than XOUT
+    P2SEL &= ~PRE_CHARGE_2_BIT; //2.6 switch to I/o not XIN
 
-    P1DIR = YELLOW_BIT | GREEN_BIT | RED_BIT | TX_UP_PIN;
-    P2DIR = PRE_CHARGE_4_BIT | PRE_CHARGE_5_BIT | RELAY_5;
-    P3DIR = RELAY_1;
-    P4DIR = PRE_CHARGE_1_BIT | PRE_CHARGE_2_BIT | PRE_CHARGE_3_BIT | RELAY_2 | RELAY_3 | RELAY_4;
+    P1DIR = YELLOW_BIT | GREEN_BIT | RED_BIT | TX_UP_PIN | BUZZ_BIT;
+    P2DIR = PRE_CHARGE_2_BIT | PRE_CHARGE_1_BIT | RELAY_1;
+    P3DIR = RELAY_5;
+    P4DIR = PRE_CHARGE_5_BIT | PRE_CHARGE_4_BIT | PRE_CHARGE_3_BIT | RELAY_4 | RELAY_3 | RELAY_2;
 
-    for(i = 0; i < 5; ++i)
-    {
-    	RelayStates[i] = FALSE;
-    	//turn off relays.
-    }
     RELAY1_OFF;
     RELAY2_OFF;
     RELAY3_OFF;
@@ -73,8 +94,12 @@ int main(void) {
     PRE_CHARGE_5_OFF;
 
 
-
     BmsSerialInit();
+
+    //setup RX pin interrupt.
+    P1IES = RX_UP_PIN; //set bit for interrupt on high to low.
+    P1IE = RX_UP_PIN;
+
 
 
     YELLOW_OFF;
@@ -88,78 +113,414 @@ int main(void) {
     InitSerial();
 
     //init timer A for 1000hz  SMCLK is running at 8MHz.
-    CCTL0 = CCIE;
-    CCR0 = 8000;
-    TACTL = TASSEL_2 + MC_1 + ID_0;  //TASSEL_2=SMCLK, MC_1=Up mode: the timer counts up to TACCR0, ID_3=div by 8
+    TACCTL0 = CCIE;
+    TACCR0 = 8000;
+    TACTL = TASSEL_2 + MC_0 + ID_0;  //TASSEL_2=SMCLK, MC_1=Up mode: the timer counts up to TACCR0, ID_3=div by 8. MC_0 = stop timer completely (and power it down)
+
+    //init timer B for 1KHz, always on, used for cell serial watchdog and time.
+    TBCCR0 = 8000;
+    TBCTL = TBSSEL_2 + MC_1 + ID_0;
+    TBCCTL0 = CCIE;
+
 
 
     InitAdc(ALL_ANALOG_INPUTS);
     InitSpi();
 
+    InitStructs( &ReadData, &WriteData );
+
     __bis_SR_register( GIE );
-
-    //adc_chan = INCH_3;
-    //adc_test = ReadAnalogValue(adc_chan);
-
-    //adc_chan = INCH_7;
-    //adc_test = ReadAnalogValue(adc_chan);
-    //WriteWordSerial(adc_test);
-
-//---------------------------------------------------------------------------------------------------------
-
-    //U8 len = 0;
-    //U8 tx_data[4] = { 0x01, 0x0F, 0xAA, 0x55};
 
     while(1)
     {
-    	if( TxNextBmsMessage == TRUE )
-    	{
-    		YELLOW_ON;
-    		while(!CheckOperationComplete()); //wait for TX up process to finish.
-
-    		//we need to clear this flag, otherwise the reset will never finish.
-        	WatchDogCounterS = 0;
-        	BmsAbortWatchdog = FALSE;
-        	WatchDogCounterS = 0;
-        	BmsAbortWatchdog = FALSE;
-
-    		WatchDogCounterS = 6; //set a 5 second timeout for this.
-    		StartReadData(TRUE);
-    		while(!CheckOperationComplete());
-
-    		TxNextBmsMessage = FALSE;
-    		if( RxPacketSize == 0 )
-    		{
-    			//failure;
-    			WriteByteSerial(PARAM_OFF);
-    			YELLOW_OFF;
-    			continue;
-    		}
-    		WriteBufferSerial( Buffer, RxPacketSize );
-    		YELLOW_OFF;
-
-    	}
-
+    	MainUpdate( &ReadData, &WriteData );
     };
 	
 	return 0;
 }
 
+void InitStructs( ReadDataStruct* read_data, WriteDataStruct* write_data )
+{
+	U16 i;
+	for( i = 0; i < CELL_COUNT; ++i)
+	{
+		read_data->CellVoltages[i] = 0;
+		read_data->CellTemperatures[i] = 0;
+		write_data->CellCurrents[i] = 0;
+	}
+
+	for( i = 0; i < RELAY_COUNT; ++i)
+	{
+		write_data->RelayStates[i] = FALSE;
+		write_data->RelayPrechargeStates[i] = FALSE;
+	}
+	read_data->ValidCellReadCount = 0;
+	read_data->CriticalFlags = 0;
+
+	write_data->DisableBuzzer = FALSE;
+
+}
+
+void MainUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data )
+{
+	U16 i;
+	volatile U16 tmp_cell_voltage, tmp_cell_temp;
+	volatile U16 tmp_cell_current;
+	volatile U16 valid_cell_count;
+
+
+	if( PcIdlePeriodCounterS >= BMS_PC_SERIAL_TIMEOUT )
+	{
+		//CLEAR ALL CELL CURRENTS!!
+		DISABLE_RX_INTERRUPT();
+		for( i = 0; i < CELL_COUNT; ++i)
+			write_data->CellCurrents[i] = 0;
+
+		write_data->RelayStates[1] = FALSE;
+		write_data->RelayPrechargeStates[1] = FALSE;
+
+		ENABLE_RX_INTERRUPT();
+	}
+
+
+
+	valid_cell_count = 0;
+	for( i = 0; i < CELL_COUNT; ++i)
+	{
+		LocalUpdate( read_data, write_data );
+		//slow stuff.
+		DelayMs(50);
+		tmp_cell_voltage = GetCellVoltage(i);
+		LocalUpdate( read_data, write_data );
+		DelayMs(50);
+		tmp_cell_temp = GetCellTemperature(i);
+
+		if( tmp_cell_voltage != 0xFFFF && tmp_cell_temp != 0xFFFF )
+		{
+			valid_cell_count++;
+		}
+		else
+		{
+			//current cell is missing.
+			CriticalConditionFlags |= CONDITION_CRITICAL_COMS_LOST;
+		}
+
+		DISABLE_RX_INTERRUPT();
+		read_data->CriticalFlags = CriticalConditionFlags;
+		read_data->CellVoltages[i] = tmp_cell_voltage;
+		read_data->CellTemperatures[i] = tmp_cell_temp;
+		tmp_cell_current = write_data->CellCurrents[i];
+		if( valid_cell_count == CELL_COUNT )
+			read_data->ValidCellReadCount++;
+		ENABLE_RX_INTERRUPT();
+
+		//write
+		LocalUpdate( read_data, write_data );
+		DelayMs(50);
+		SetCellCurrent(i, tmp_cell_current);
+
+		//check for errors.
+		if( valid_cell_count == CELL_COUNT )
+		{
+			CriticalConditionFlags &= ~CONDITION_CRITICAL_COMS_LOST;
+
+
+			CheckForCriticalConditions( read_data );
+
+
+			while( IdlePeriodCounterS != 0 )
+			{
+				IdlePeriodCounterS = 0;
+			}
+		}
+	}
+
+
+}
+
+void LocalUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data )
+{
+	U16 i;
+	volatile U16 tmp_master_current, tmp_charge_current, tmp_pack_voltage, tmp_master_temp, tmp_master_humidity;
+
+	volatile U16 tmp_precharge_voltage;
+	volatile bool tmp_relay_state;
+	volatile bool tmp_relay_precharge_state;
+	//this is where we read in all the sensors and stuff.
+
+	//fast stuff.
+	tmp_master_current = GetCurrent(1);
+	tmp_charge_current = GetCurrent(2);
+	tmp_pack_voltage = GetPackVoltage();
+	tmp_master_temp = GetTemp();
+	tmp_master_humidity = GetHumidity();
+
+	DISABLE_RX_INTERRUPT();
+	read_data->MasterCurrent = tmp_master_current;
+	read_data->ChargeCurrent = tmp_charge_current;
+	read_data->PackVoltage = tmp_pack_voltage;
+	read_data->MasterTemperature = tmp_master_temp;
+	read_data->MasterHumidity = tmp_master_humidity;
+	ENABLE_RX_INTERRUPT();
+
+	for( i = 0; i < RELAY_COUNT; ++i)
+	{
+		tmp_precharge_voltage = GetPrechargeVoltage(i);
+
+		DISABLE_RX_INTERRUPT();
+		read_data->PrechargeVoltages[i] = tmp_precharge_voltage;
+		ENABLE_RX_INTERRUPT();
+	}
+
+	//write
+	DISABLE_RX_INTERRUPT();
+	SetRelay( write_data );
+	SetPrecharge( write_data );
+	ENABLE_RX_INTERRUPT();
+
+}
+
+void CheckForCriticalConditions( ReadDataStruct* read_data )
+{
+	//all read data is valid at this point, including cells.
+	U16 i;
+
+	CriticalConditionFlags &= ~CONDITION_CRITICAL_CELL_TEMP;
+	CriticalConditionFlags &= ~CONDITION_CRITICAL_CELL_VOLTAGE;
+
+	for( i = 0; i < CELL_COUNT; ++i)
+	{
+		if( ( read_data->CellTemperatures[i] > CELL_MAX_TEMPERATURE ) || ( read_data->CellTemperatures[i] < CELL_MIN_TEMPERATURE ) )
+			CriticalConditionFlags |= CONDITION_CRITICAL_CELL_TEMP;
+
+
+		if( ( read_data->CellVoltages[i] > CELL_MAX_VOLTAGE ) || ( read_data->CellVoltages[i] < CELL_MIN_VOLTAGE ) )
+			CriticalConditionFlags |= CONDITION_CRITICAL_CELL_VOLTAGE;
+
+	}
+
+
+	if( read_data->MasterCurrent > MAX_MASTER_CURRENT )
+		CriticalConditionFlags |= CONDITION_CRITICAL_MASTER_CURRENT;
+	else
+		CriticalConditionFlags &= ~CONDITION_CRITICAL_MASTER_CURRENT;
+
+	if( read_data->ChargeCurrent > MAX_CHARGE_CURRENT )
+		CriticalConditionFlags |= CONDITION_CRITICAL_CHARGE_CURRENT;
+	else
+		CriticalConditionFlags &= ~CONDITION_CRITICAL_CHARGE_CURRENT;
+
+	if( ( read_data->PackVoltage > MAX_PACK_VOLTAGE ) || ( read_data->PackVoltage < MIN_PACK_VOLTAGE ) )
+		CriticalConditionFlags |= CONDITION_CRITICAL_PACK_VOLTAGE;
+	else
+		CriticalConditionFlags &= ~CONDITION_CRITICAL_PACK_VOLTAGE;
+
+	if( ( read_data->MasterTemperature > MASTER_MAX_TEMPERATURE ) || ( read_data->MasterTemperature < MASTER_MIN_TEMPERATURE ) )
+		CriticalConditionFlags |= CONDITION_CRITICAL_TEMP;
+	else
+		CriticalConditionFlags &= ~CONDITION_CRITICAL_TEMP;
+
+	if( IdlePeriodCounterS > BMS_MASTER_MAX_REFRESH_DELAY )
+		CriticalConditionFlags |= CONDITION_CRITICAL_COMS_LOST;
+	else
+		CriticalConditionFlags &= ~CONDITION_CRITICAL_COMS_LOST;
+
+}
+
+U16 GetCellVoltage( U8 cell_id )
+{
+	U16 cell_voltage = 0;
+
+	BmsTxData[0] = CELL_CMD_GET_VOLTAGE;
+	BmsTxData[1] = cell_id; //Cell ID
+	WriteDataBmsSerial( BmsTxData, 2, TRUE );
+	YELLOW_ON;
+	while(!CheckOperationComplete()); //wait for TX up process to finish.
+
+	//we need to clear this flag, otherwise the reset will never finish.
+	/*while( WatchDogCounterS != 0 )
+		WatchDogCounterS = 0;
+
+	while( BmsAbortWatchdog != 0 )
+		BmsAbortWatchdog = FALSE;
+
+	WatchDogCounterS = 6; //set a 5 second timeout for this.
+	StartReadData(TRUE);
+	while(!CheckOperationComplete());*/
+
+	YELLOW_OFF;
+	if( RxPacketSize == 0 )
+	{
+		//failure
+		return 0xFFFF;
+	}
+	//4 bytes total, last 2 contain data. big endian.
+	cell_voltage = (U16)Buffer[2] << 8;
+	cell_voltage |= Buffer[3];
+
+	return cell_voltage;
+}
+
+U16 GetCellTemperature( U8 cell_id )
+{
+	U16 cell_temperature = 0;
+
+	BmsTxData[0] = CELL_CMD_GET_TEMP;
+	BmsTxData[1] = cell_id; //Cell ID
+	WriteDataBmsSerial( BmsTxData, 2, TRUE );
+
+	YELLOW_ON;
+	while(!CheckOperationComplete()); //wait for TX up process to finish.
+
+	/*//we need to clear this flag, otherwise the reset will never finish.
+	while( WatchDogCounterS != 0 )
+		WatchDogCounterS = 0;
+
+	while( BmsAbortWatchdog != 0 )
+		BmsAbortWatchdog = FALSE;
+
+	WatchDogCounterS = 6; //set a 5 second timeout for this.
+	StartReadData(TRUE);
+	while(!CheckOperationComplete());*/
+
+	YELLOW_OFF;
+	if( RxPacketSize == 0 )
+	{
+		//failure
+		return 0xFFFF;
+	}
+	//4 bytes total, last 2 contain data. big endian.
+	cell_temperature = (U16)Buffer[2] << 8;
+	cell_temperature |= Buffer[3];
+
+	return cell_temperature;
+}
+
+void SetCellCurrent( U8 cell_id, U16 current )
+{
+	BmsTxData[0] = CELL_CMD_SET_CURRENT;
+	BmsTxData[1] = cell_id; //Cell ID
+	BmsTxData[2] = current >> 8; //Current H
+	BmsTxData[3] = (U8)current; //current L
+
+
+	WriteDataBmsSerial( BmsTxData, 4, TRUE );
+
+	YELLOW_ON;
+	while(!CheckOperationComplete()); //wait for TX up process to finish.
+
+	/*//we need to clear this flag, otherwise the reset will never finish.
+	WatchDogCounterS = 0;
+	BmsAbortWatchdog = FALSE;
+	WatchDogCounterS = 0;
+	BmsAbortWatchdog = FALSE;
+
+	WatchDogCounterS = 6; //set a 5 second timeout for this.
+	StartReadData(TRUE);
+	while(!CheckOperationComplete());*/
+
+	YELLOW_OFF;
+}
+
+U16 PrechargeAnalogInputs[RELAY_COUNT] = {PRE_CHARGE_1_ANALOG, PRE_CHARGE_2_ANALOG, PRE_CHARGE_3_ANALOG, PRE_CHARGE_4_ANALOG, PRE_CHARGE_5_ANALOG};
+
+U16 GetPrechargeVoltage( U8 relay_id )
+{
+	U16 precharge_voltage = 0;
+
+	precharge_voltage = ReadAnalogValue( PrechargeAnalogInputs[relay_id] );
+	return precharge_voltage;
+}
 
 U16 GetHumidity()
 {
-	return ReadAnalogValue(INCH_7);
+	return ReadAnalogValue(HUMIDITY_ANALOG);
 }
 
 U16 GetTemp()
 {
-	return ReadAnalogValue(INCH_3);
+	return ReadAnalogValue(NTC_ANALOG);
 }
 
 U16 GetPackVoltage()
 {
 	return ReadAnalogValue(BATT_ANALOG);
 }
+
+U16 GetCurrent( U8 id )
+{
+	U16 current = 0;
+	current = ReadWordSpi(id); //this function takes 1 or 2 right now.
+	return current;
+}
+
+void SetRelay( WriteDataStruct* write_data )
+{
+	//if the pack is too low, you can't turn on master power.
+	if( (write_data->RelayStates[0] == TRUE) && ( ReadData.PackVoltage >= MIN_PACK_VOLTAGE ) )
+		RELAY1_ON;
+	else
+		RELAY1_OFF;
+
+	if( write_data->RelayStates[1] == TRUE )
+		RELAY2_ON;
+	else
+		RELAY2_OFF;
+
+	if( write_data->RelayStates[2] == TRUE )
+		RELAY3_ON;
+	else
+		RELAY3_OFF;
+
+	if( write_data->RelayStates[3] == TRUE )
+		RELAY4_ON;
+	else
+		RELAY4_OFF;
+
+	if( write_data->RelayStates[4] == TRUE )
+		RELAY5_ON;
+	else
+		RELAY5_OFF;
+}
+
+void SetPrecharge( WriteDataStruct* write_data )
+{
+	//if the pack is too low, you can't turn on master power.
+	if( ( write_data->RelayPrechargeStates[0] == TRUE ) && ( ReadData.PackVoltage >= MIN_PACK_VOLTAGE ) )
+		PRE_CHARGE_1_ON;
+	else
+		PRE_CHARGE_1_OFF;
+
+	if( write_data->RelayPrechargeStates[1] == TRUE )
+		PRE_CHARGE_2_ON;
+	else
+		PRE_CHARGE_2_OFF;
+
+	if( write_data->RelayPrechargeStates[2] == TRUE )
+		PRE_CHARGE_3_ON;
+	else
+		PRE_CHARGE_3_OFF;
+
+	if( write_data->RelayPrechargeStates[3] == TRUE )
+		PRE_CHARGE_4_ON;
+	else
+		PRE_CHARGE_4_OFF;
+
+	if( write_data->RelayPrechargeStates[4] == TRUE )
+		PRE_CHARGE_5_ON;
+	else
+		PRE_CHARGE_5_OFF;
+}
+
+void DelayMs(U16 ms)
+{
+	while(ms--)
+	{
+		__delay_cycles(8000);
+	}
+
+}
+
 
 U16 Ms = 0;
 U32 Seconds = 0;
@@ -173,9 +534,22 @@ U16 Us = 0;
 __interrupt void Timer_A (void)
 {
 
+	DISABLE_RX_INTERRUPT();
 
 
 	TimerEventBmsSerial();
+
+
+
+	ENABLE_RX_INTERRUPT();
+	return;
+
+}
+
+#pragma vector=TIMERB0_VECTOR
+__interrupt void Timer_B (void)
+{
+	DISABLE_RX_INTERRUPT();
 	Us += 1000;
 
 	if( Us == 1000)
@@ -184,379 +558,125 @@ __interrupt void Timer_A (void)
 		Ms++;
 	}
 
-	if( (Ms > 0) && (Ms < 50))
-		GREEN_ON;
+	//if( (Ms > 0) && (Ms < 50))
+		//GREEN_ON;
+	//else
+		//GREEN_OFF;
+
+
+	if( CriticalConditionFlags != 0 )
+	{
+		//RED_ON;
+		if( ( (Seconds & 0x00000001) == 0) && ( WriteData.DisableBuzzer != TRUE ) ) //(use != true in case of data corruption)
+		{
+			BUZZ_TOGGLE;
+		}
+		else
+		{
+			BUZZ_OFF;
+		}
+	}
 	else
-		GREEN_OFF;
+	{
+		//RED_OFF;
+	}
+
+
 
 	//GREEN_OFF;
 	if( Ms == 1000 )
 	{
 		Ms = 0;
 		Seconds++;
+		IdlePeriodCounterS++;
+		PcIdlePeriodCounterS++;
 		if( WatchDogCounterS > 0 )
 		{
 			WatchDogCounterS -= 1;
 			if(WatchDogCounterS == 0 )
 			{
+				//the watchdog has expored. If we are in between a transmit and a RX, we need to abort it, kill the P1 IE, and set the state to idle.
 
 				BmsAbortWatchdog = TRUE;
+				RxWaitExpired();
 			}
 		}
 	}
-
-
-	return;
-
-	//U16 RelayAdcValueNeeded = 0;
-	//U16 RelayPreChargeTimeoutMs = 0; RelayPreChargeTimerMs
-	//bool RelayPreChargeActive = FALSE;
-
-	//TODO: replace pre-charge feature!
-/*	if( RelayPreChargeActive == TRUE )
-	{
-		//perform relay precharge check and logic here. internal freq is 10ms (100Hz)
-		U16 adv_value;
-
-		switch( RelayId )
-		{
-		case 1:
-			adv_value = ReadAnalogValue(PRE_CHARGE_1_ANALOG);
-			break;
-		case 2:
-			adv_value = ReadAnalogValue(PRE_CHARGE_2_ANALOG);
-			break;
-		case 3:
-			adv_value = ReadAnalogValue(PRE_CHARGE_3_ANALOG);
-			break;
-		case 4:
-			adv_value = ReadAnalogValue(PRE_CHARGE_4_ANALOG);
-			break;
-		case 5:
-			adv_value = ReadAnalogValue(PRE_CHARGE_5_ANALOG);
-			break;
-		default:
-			RelayPreChargeActive = FALSE;
-			WriteByteSerial(PARAM_OFF); //error case!
-			goto TIMERA_RETURN;
-		}
-
-		if( adv_value >= RelayAdcValueNeeded )
-		{
-			switch( RelayId )
-			{
-			case 1:
-				PRE_CHARGE_1_OFF;
-				RELAY1_ON;
-				break;
-			case 2:
-				PRE_CHARGE_2_OFF;
-				RELAY2_ON;
-				break;
-			case 3:
-				PRE_CHARGE_3_OFF;
-				RELAY3_ON;
-				break;
-			case 4:
-				PRE_CHARGE_4_OFF;
-				RELAY4_ON;
-				break;
-			case 5:
-				PRE_CHARGE_5_OFF;
-				RELAY5_ON;
-				break;
-			}
-			RelayPreChargeActive = FALSE;
-			WriteByteSerial(PARAM_ON);
-			goto TIMERA_RETURN;
-		}
-		else
-		{
-			RelayPreChargeTimerMs += 10;
-			if( RelayPreChargeTimerMs >= RelayPreChargeTimeoutMs )
-			{
-				//oh crap, need to turn off pre-charge and return false.
-				switch( RelayId )
-				{
-				case 1:
-					PRE_CHARGE_1_OFF;
-					break;
-				case 2:
-					PRE_CHARGE_2_OFF;
-					break;
-				case 3:
-					PRE_CHARGE_3_OFF;
-					break;
-				case 4:
-					PRE_CHARGE_4_OFF;
-					break;
-				case 5:
-					PRE_CHARGE_5_OFF;
-					break;
-				}
-				RelayPreChargeActive = FALSE;
-				WriteByteSerial(PARAM_OFF);
-				goto TIMERA_RETURN;
-			}
-
-		}
-
-	}*/
-
-	/*WatchDogCounter++;
-	if( WatchDogCounter >= WATCHDOG_LIMIT )
-	{
-		//kill motor!
-		//beep!
-		YELLOW_ON;
-
-	}*/
-
-//TIMERA_RETURN:
-	//GREEN_OFF;
+	ENABLE_RX_INTERRUPT();
 }
 
+U8 SerialRxBuffer[43];
+U8 SerialRxPos = 0;
 
-bool CmdInProgress = FALSE;
-U8 SerialByteIndex = 0;
-U8 CmdRxBuffer[8];
-
-/*
-#define CMD_GET_CELL_VOLTAGE  		0x10 //param cell
-#define CMD_GET_CELL_TEMP 			0x11 //param cell
-#define CMD_SET_DISCHARGE_PROPS  	0x12 //param cell, TEMP params: current_H, current_L
-#define CMD_GET_CELL_COUNT  		0x13
-#define CMD_SET_RELAY 				0x14 //param relay, state
-#define CMD_GET_MASTER_TEMP  		0x15
-#define CMD_GET_MASTER_HUMIDITY  	0x16
- */
+const U8 WriteDataSize = sizeof(WriteDataStruct);
 
 #pragma vector=USCIAB0RX_VECTOR
 __interrupt void USCI0RX_ISR(void)
 {
 	U8 value = UCA0RXBUF;
-	U16 temporary = 0x0;
+	U8 i;
+	U8* write_data_cast;
+	YELLOW_TOGGLE;
+	//DISABLE_RX_INTERRUPT();
+	_enable_interrupts();
+	_nop();
 
-	CmdInProgress = TRUE;
+	write_data_cast = (U8*)&WriteData;
 
-	CmdRxBuffer[SerialByteIndex] = value;
-	SerialByteIndex++;
+	SerialRxBuffer[SerialRxPos] = value;
 
-	if( CmdRxBuffer[0] == CMD_GET_CELL_VOLTAGE && SerialByteIndex < 2 )
-		return;
-	if( CmdRxBuffer[0] == CMD_GET_CELL_TEMP && SerialByteIndex < 2 )
-		return;
-	if( CmdRxBuffer[0] == CMD_SET_RELAY && SerialByteIndex < 8 )
-		return;
-	if( CmdRxBuffer[0] == CMD_GET_CURRENT && SerialByteIndex < 2 )
-		return;
-	if( CmdRxBuffer[0] == CMD_SET_DISCHARGE_PROPS && SerialByteIndex < 4 )
-		return;
-	if( CmdRxBuffer[0] == CMD_PING_CELL && SerialByteIndex < 2 )
-		return;
-	if( CmdRxBuffer[0] == CMD_GET_RELAY && SerialByteIndex < 2 )
-		return;
+	SerialRxPos++;
 
-	CmdInProgress = FALSE;
-	SerialByteIndex = 0;
-
-	if( TxNextBmsMessage == TRUE )
+	if( SerialRxPos >= WriteDataSize+1 )
 	{
-		//command in progress! we should NAK the PC for the new command.
-		//for now let's ignore it and return.
-		return;
+		SerialRxPos = 0;
+		//done!
+		//check checksum.
+		if( SerialRxBuffer[WriteDataSize] != 0xDE )
+		{
+			goto exit_serial_isr;
+		}
+	}
+	else
+	{
+		goto exit_serial_isr;
 	}
 
-	switch(CmdRxBuffer[0])
-	{
-	case CMD_GET_CELL_VOLTAGE:
-		BmsTxData[0] = CELL_CMD_GET_VOLTAGE;
-		BmsTxData[1] = CmdRxBuffer[1]; //Cell ID
-		WriteDataBmsSerial( BmsTxData, 2, TRUE );
-		TxNextBmsMessage = TRUE;
-		break;
-	case CMD_GET_CELL_TEMP:
-		BmsTxData[0] = CELL_CMD_GET_TEMP;
-		BmsTxData[1] = CmdRxBuffer[1]; //Cell ID
-		WriteDataBmsSerial( BmsTxData, 2, TRUE );
-		TxNextBmsMessage = TRUE;
-		break;
-	case CMD_PING_CELL:
-		BmsTxData[0] = CELL_CMD_PING;
-		BmsTxData[1] = CmdRxBuffer[1]; //Cell ID
-		WriteDataBmsSerial( BmsTxData, 2, TRUE );
-		TxNextBmsMessage = TRUE;
-		break;
+	//load in the data!!
+	for( i = 0; i < WriteDataSize; ++i)
+		write_data_cast[i] = SerialRxBuffer[i];
 
-	case CMD_SET_DISCHARGE_PROPS: //todo: updated this after testing with real command.
-		BmsTxData[0] = CELL_CMD_SET_CURRENT;
-		BmsTxData[1] = CmdRxBuffer[1]; //Cell ID
-		BmsTxData[2] = CmdRxBuffer[2]; //Current H
-		BmsTxData[3] = CmdRxBuffer[3]; //current L
 
-		WriteDataBmsSerial( BmsTxData, 4, TRUE );
-		TxNextBmsMessage = TRUE;
+	//tx back the data structure!
 
-		break;
+	WriteBufferSerial( (U8*)&ReadData, sizeof(ReadDataStruct) );
 
-	case CMD_SET_RELAY:
-		{
-			U8 relay_index = CmdRxBuffer[1];
-			bool relay_on, use_precharge;
-			bool success;
-			U16 timeout, adc_value; //ms byte first.
+	while( PcIdlePeriodCounterS != 0)
+		PcIdlePeriodCounterS = 0;
 
-			if( relay_index > 5 )
-				goto SET_RELAY_FAILED;
+exit_serial_isr:
+YELLOW_TOGGLE;
+	//_disable_interrupts();
+	_nop();
 
-			if( CmdRxBuffer[2] == PARAM_ON )
-				relay_on = TRUE;
-			else if( CmdRxBuffer[2] == PARAM_OFF )
-				relay_on = FALSE;
-			else
-				goto SET_RELAY_FAILED;
-
-			if( CmdRxBuffer[3] == PARAM_ON )
-				use_precharge = TRUE;
-			else if( CmdRxBuffer[3] == PARAM_OFF )
-				use_precharge = FALSE;
-			else
-				goto SET_RELAY_FAILED;
-
-			timeout = (CmdRxBuffer[4] << 8) | CmdRxBuffer[5];
-			adc_value = (CmdRxBuffer[6] << 8) | CmdRxBuffer[7];
-
-			success = SetRelay( relay_index, relay_on, use_precharge, adc_value,  timeout );
-
-			if( (success == TRUE ) && (use_precharge == TRUE) )
-			{
-				return; //in this case, we defer execution to the timer module.
-			}
-			if( success == TRUE )
-				WriteByteSerial( PARAM_ON );
-			else
-				WriteByteSerial( PARAM_OFF );
-
-			return;
-SET_RELAY_FAILED:
-			WriteByteSerial( PARAM_OFF );
-			return;
-		}
-
-		break;
-
-	case CMD_GET_MASTER_TEMP:
-		temporary = GetTemp();
-		WriteWordSerial(temporary);
-		break;
-
-	case CMD_GET_MASTER_HUMIDITY:
-		temporary = GetHumidity();
-		WriteWordSerial(temporary);
-
-		break;
-
-	case CMD_GET_CURRENT:
-		temporary = ReadWordSpi(CmdRxBuffer[1]);
-		WriteWordSerial(temporary);
-		break;
-
-	case CMD_GET_PACK_VOLTAGE:
-		temporary = GetPackVoltage();
-		WriteWordSerial(temporary);
-		break;
-	case CMD_GET_RELAY:
-		{
-			U8 relay_index = CmdRxBuffer[1];
-			if( RelayStates[relay_index-1] == TRUE )
-				WriteByteSerial( PARAM_ON );
-			else
-				WriteByteSerial( PARAM_OFF );
-		}
-		break;
-	//default:
-
-	}
-
+	//ENABLE_RX_INTERRUPT();
 
 }
 
-
-bool SetRelay(U8 relay_id, bool on, bool use_precharge, U16 needed_adc_value, U16 timeout_ms)
+#pragma vector=PORT1_VECTOR
+__interrupt void PORT1_ISR(void)
 {
+	RED_TOGGLE;
 
-	if( (on == TRUE) && (use_precharge == TRUE))
-	{
-		switch( relay_id )
-		{
-		case 1:
-			PRE_CHARGE_1_ON;
-			break;
-		case 2:
-			PRE_CHARGE_2_ON;
-			break;
-		case 3:
-			PRE_CHARGE_3_ON;
-			break;
-		case 4:
-			PRE_CHARGE_4_ON;
-			break;
-		case 5:
-			PRE_CHARGE_5_ON;
-			break;
-		}
+	EdgeEventIsr();
 
-		RelayId = relay_id;
-
-		RelayPreChargeTimerMs = 0;
-		RelayPreChargeTimeoutMs = timeout_ms;
-		RelayAdcValueNeeded = needed_adc_value;
-		RelayPreChargeActive = TRUE;
-		return TRUE; //this won't do anything.
-	}
-
-	RelayStates[relay_id-1] = on;
-
-
-	switch(relay_id)
-	{
-	case 1:
-		if( on == TRUE )
-			RELAY1_ON;
-		else
-			RELAY1_OFF;
-		break;
-	case 2:
-		if( on == TRUE )
-			RELAY2_ON;
-		else
-			RELAY2_OFF;
-		break;
-	case 3:
-		if( on == TRUE )
-			RELAY3_ON;
-		else
-			RELAY3_OFF;
-		break;
-	case 4:
-		if( on == TRUE )
-			RELAY4_ON;
-		else
-			RELAY4_OFF;
-		break;
-	case 5:
-		if( on == TRUE )
-			RELAY5_ON;
-		else
-			RELAY5_OFF;
-		break;
-	}
-
-	return TRUE;
-
+	P1IE = 0; //disable interrupt for ISR
+	_NOP();
+	P1IFG = 0; //clear IF flag too.
+	_NOP();
 }
 
-#pragma vector=PORT1_VECTOR, PORT2_VECTOR, ADC10_VECTOR, USCIAB0TX_VECTOR, TIMERA1_VECTOR, WDT_VECTOR, TIMERB1_VECTOR, TIMERB0_VECTOR, NMI_VECTOR//, RESET_VECTOR
+#pragma vector=PORT2_VECTOR, ADC10_VECTOR, USCIAB0TX_VECTOR, TIMERA1_VECTOR, WDT_VECTOR, TIMERB1_VECTOR, NMI_VECTOR//, RESET_VECTOR
 __interrupt void TRAP_ISR(void)
 {
 	GREEN_ON;

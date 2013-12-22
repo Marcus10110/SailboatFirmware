@@ -86,6 +86,8 @@ bool StartReadData(bool up);
 bool CheckOperationComplete();
 void ForceIdle();
 void TimerEventBmsSerial();
+void EdgeEventIsr();
+void RxWaitExpired();
 
 
 

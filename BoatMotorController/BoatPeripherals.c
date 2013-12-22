@@ -40,7 +40,7 @@ U16 ReadAnalogValue( U16 input )
 	//input = INCH_5;
 	U16 value = 0;
 
-	ADC10CTL0 &= ~ADC10IFG; //clear complete interupt flag
+	ADC10CTL0 &= ~ADC10IFG; //clear complete interrupt flag
 
 	ADC10CTL0 &= ~ENC; //clear enable conversion?
 	//ADC10CTL0 &= ~ADC10ON; //turn off adc (testing)

@@ -46,10 +46,21 @@
  */
 
 
+#ifdef __MSP430F2272__
+//set the timer direction to none.
+#define STOP_TIMER_A()	TACTL &= ~MC_3
+#define START_TIMER_A() TACTL |= MC_1 | TACLR
+
+#else
+#define STOP_TIMER_A() _NOP()
+#define START_TIMER_A() _NOP()
+#endif
+
 
 //down means to the BMS master, up means to the end of the chain.
-typedef enum  { IDLE, BMS_TX_UP, BMS_TX_DOWN, BMS_RX_UP, BMS_RX_DOWN } BmsSerialState;
+typedef enum  { IDLE, BMS_TX_UP, BMS_TX_DOWN, BMS_RX_UP, BMS_RX_DOWN, PENDING_RX } BmsSerialState;
 extern bool BmsAbortWatchdog;
+extern U16 WatchDogCounterS;
 
 BmsSerialState CurrentState;
 
@@ -59,8 +70,12 @@ U8 BufferByteCount;
 U8 CurrentByte;
 U8 CurrentBit; //0 to 7, 0 = MSB??
 
+bool IsrPending = FALSE;
+
 
 U16 RxPacketSize;
+
+void ReverseSerialDirection();
 
 void BmsSerialInit()
 {
@@ -90,6 +105,8 @@ void WriteDataBmsSerial(U8* data, U8 length, bool up)
 		CurrentState = BMS_TX_UP;
 	else
 		CurrentState = BMS_TX_DOWN;
+
+	START_TIMER_A(); //only does stuff on BMS Master
 }
 
 bool StartReadData(bool up)
@@ -101,6 +118,35 @@ bool StartReadData(bool up)
 	CurrentByte = 0;
 	RxPacketSize = 0;
 
+
+#ifdef __MSP430F2272__
+	//use pin interrupt to sync timer.
+	P1OUT ^= BIT4; //indicate that we've started looking for the edge ISR. (it toggles in the ISR too.)
+	IsrPending = TRUE;
+	P1IFG = 0;
+	_NOP();
+	P1IE = RX_UP_PIN;
+	_NOP();
+
+	return TRUE;
+	//the abort process must now be handled by the main timer. (TimerB)
+	/*while(1)
+	{
+		if( BmsAbortWatchdog == TRUE )
+		{
+			//terminate the interrupt
+			P1IE = 0;
+			_NOP();
+			CurrentState = IDLE; //we no longer start in idle for read operations on master.
+			IsrPending = FALSE;
+			return FALSE;
+		}
+		if( IsrPending == FALSE ) //detect that the P1 ISR has finished!
+			return TRUE;
+	}*/
+
+
+#endif
 
 	//wait for a falling edge.
 	U8 sample;
@@ -173,7 +219,13 @@ void TimerEventBmsSerial()
 			SET_TX_UP;
 			SET_TX_DOWN;
 			//TODO: DONE! inform end user of completed transaction.
+			STOP_TIMER_A();
+#ifdef __MSP430F2272__
+			CurrentState = PENDING_RX;
+			ReverseSerialDirection(); //clear out the watchdog, start a RX process. (state is still write UP)
+#else
 			CurrentState = IDLE;
+#endif
 			return;
 		}
 		U8 bit_to_tx;
@@ -220,7 +272,7 @@ void TimerEventBmsSerial()
 	else if( CurrentState == BMS_RX_UP || CurrentState == BMS_RX_DOWN)
 	{
 		U8 sample;
-
+		P1OUT ^= BIT6;
 		if( CurrentState == BMS_RX_UP )
 			sample = READ_RX_UP;
 		else
@@ -256,6 +308,7 @@ void TimerEventBmsSerial()
 		{
 			//TODO: exit the RX loop here!
 			CurrentState = IDLE;
+			STOP_TIMER_A();
 			return;
 		}
 
@@ -266,6 +319,7 @@ void TimerEventBmsSerial()
 			{
 				//it failed.
 				CurrentState = IDLE;
+				STOP_TIMER_A();
 				RxPacketSize = 0;
 				return;
 			}
@@ -277,6 +331,7 @@ void TimerEventBmsSerial()
 			{
 				//it failed.
 				CurrentState = IDLE;
+				STOP_TIMER_A();
 				RxPacketSize = 0;
 				return;
 			}
@@ -294,4 +349,61 @@ void TimerEventBmsSerial()
 
 		CurrentBit++;
 	}
+}
+
+void ReverseSerialDirection()
+{
+	//we need to clear this flag, otherwise the reset will never finish.
+	while( WatchDogCounterS != 0 )
+		WatchDogCounterS = 0;
+
+	while( BmsAbortWatchdog != 0 )
+		BmsAbortWatchdog = FALSE;
+
+	WatchDogCounterS = 6; //set a 5 second timeout for this.
+	StartReadData(TRUE);
+
+}
+
+void EdgeEventIsr()
+{
+	if( IsrPending == FALSE ) //debug check, this should not happen!
+	 return;
+
+	START_TIMER_A(); //starts the timer!
+	IsrPending = FALSE;
+	CurrentState = BMS_RX_UP;
+	TAR = 4000; //pre-load half way!
+
+	//kill the watchdog timer, it's not needed any more.
+	while( WatchDogCounterS != 0 )
+		WatchDogCounterS = 0;
+
+	while( BmsAbortWatchdog != 0 )
+		BmsAbortWatchdog = FALSE;
+
+}
+
+void RxWaitExpired()
+{
+	if( CurrentState != PENDING_RX ) //error condition, this should only happen while were waiting for an RX opperation.
+		return;
+	//(arrives on timer B ISR)
+
+	//kill edge ISR
+	P1IE = 0;
+	_NOP();
+	IsrPending = FALSE;
+
+	//set state to idle.
+	CurrentState = IDLE;
+
+	//clean up the watchdog.
+	//we need to clear this flag, otherwise the reset will never finish.
+	while( WatchDogCounterS != 0 )
+		WatchDogCounterS = 0;
+
+	while( BmsAbortWatchdog != 0 )
+		BmsAbortWatchdog = FALSE;
+
 }

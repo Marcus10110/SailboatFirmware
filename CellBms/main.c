@@ -2,6 +2,7 @@
 #include "../BoatMotorController/BoatTypes.h"
 #include "../BoatMotorController/BoatPeripherals.h"
 #include "CellBmsDefines.h"
+#include "BmsSharedDefines.h"
 #include "BmsSerial.h"
 /*
  * main.c
@@ -165,12 +166,11 @@ void ProcessCommand()
 		{
 			temperature = GetTemperature();
 
-			/*  todo: compute these limits
-			if( ( temperature > 1000 ) || ( temperature < 400 ) )  //30deg and 130deg
+			if( ( temperature > CELL_MAX_TEMPERATURE ) || ( temperature < CELL_MIN_TEMPERATURE ) )  //30deg and 130deg
 				ConditionCritical |= CONDITION_CRITICAL_TEMP;
 			else
 				ConditionCritical &= ~CONDITION_CRITICAL_TEMP;
-			*/
+
 
 			tx_data[0] = CELL_CMD_GET_TEMP;
 			tx_data[1] = temperature >> 8;
@@ -340,23 +340,27 @@ __interrupt void Timer_A (void)
 	if( (Ms > 0) && (Ms < 50))
 	{
 		GREEN_ON;
+	}
+	else
+	{
+		GREEN_OFF;
+	}
+
+	if( (Ms > 0) && (Ms < 500))
+	{
 		if( Discharging == TRUE )
 			RED_ON;
 	}
 	else
 	{
-		GREEN_OFF;
-		if( Discharging == FALSE )
-			RED_OFF;
+		RED_OFF;
 	}
 
-	if( IdlePeriodCounterS > 30 )
+
+
+	if( IdlePeriodCounterS > CELL_MAX_REFESH_DELAY )
 	{
 		//stop charging.
-		//U8 buffer[2];
-		//buffer[0] = 0;
-		//buffer[1] = 0;
-		//WriteMultipleI2c( 0x60, buffer, 2 );
 		SetDac(0);
 		Discharging = FALSE;
 
