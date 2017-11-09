@@ -235,8 +235,11 @@ void InitSpi()
 	UCB0CTL0 |= UCCKPL | UCMSB | UCMST | UCSYNC; //UCCKPL=clock inactive high. UCMSB=MSB first. UCMST=master mode. UCSYNC=synchronous. (UCCKPH is 0, meaning trailing edge?)
 	UCB0CTL1 |= UCSSEL_2; //UCSSEL_2=smclk
 
-	UCB0BR0 = 0x00; //low byte.
-	UCB0BR1 = 0x01;
+	//SMCLK is 8 MHz. we want to run at 1 MHZ.
+	//LTC2472 can run SPI at a maximum of 2 MHz.
+	//lets run it at 1 MHz.
+	UCB0BR0 = 0x07; //low byte.
+	UCB0BR1 = 0x00;
 
 	UCB0CTL1 &= ~UCSWRST; //clear reset bit!
 
@@ -256,10 +259,11 @@ U16 ReadWordSpi( U8 cs_pin )
 	else
 		return 0xFFF0;
 
-	for( counter = 0; counter < 1000; ++counter)
+	//just removed this because we need to operate fast now - on the timer ISR.
+	/*for( counter = 0; counter < 1000; ++counter)
 	{
 
-	}
+	}*/
 
 	UCB0TXBUF = 0x00; //write 00 to force start.
 
@@ -277,12 +281,13 @@ U16 ReadWordSpi( U8 cs_pin )
 
 	value |= rx_byte;
 
-	//we need to wait 12 ms for the reference to stabalize, in case that's the problem.
+	//we need to wait 12 ms for the reference to stabilize, in case that's the problem.
 
-	for( counter = 0; counter < 1000; ++counter)
+	//removed this now that we figured out the issue with the ADC and we need to sample fast.
+	/*for( counter = 0; counter < 1000; ++counter)
 	{
 
-	}
+	}*/
 
 	if( cs_pin == 1 )
 		CS_1_ON;

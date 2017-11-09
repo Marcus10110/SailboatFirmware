@@ -80,11 +80,19 @@
 #define KEY_ON		P3OUT |= KEY_BIT
 #define KEY_OFF		P3OUT &= ~KEY_BIT
 
+#define BUZZ_PORT	P2OUT
+#define BUZZ_BIT	BIT6
+#define BUZZ_ON		BUZZ_PORT |= BUZZ_BIT
+#define BUZZ_OFF	BUZZ_PORT &= ~BUZZ_BIT
+#define BUZZ_TOGGLE BUZZ_PORT ^= BUZZ_BIT
+
 
 U16 GetHumidity();
 U16 GetTemp();
 void SetDac( U16 value );
 void InitDac();
+
+bool Buzz = FALSE;
 
 int main(void) {
 
@@ -96,10 +104,12 @@ int main(void) {
 
     //setup LED pins, DIR pins, and key pin.
     P3DIR |= YELLOW_BIT | GREEN_BIT | FWD_BIT | KEY_PORT;
-    P2DIR |= REV_BIT;
+    P2DIR |= REV_BIT | BUZZ_BIT;
     P1DIR |= RED_BIT;
 
-
+    P2SEL &= ~BIT6;
+    P2SEL2 &= ~BIT6;
+    P2SEL2 &= ~BIT7;
 
     YELLOW_OFF;
     GREEN_OFF;
@@ -107,6 +117,8 @@ int main(void) {
 
     KEY_OFF;
     //KEY_OFF;
+
+    BUZZ_OFF;
 
 	CLEAR_FWD;
 	CLEAR_REV;
@@ -225,6 +237,11 @@ __interrupt void Timer_A (void)
 
 	Ms += 10;
 
+	if( Buzz == TRUE )
+	{
+		BUZZ_TOGGLE;
+	}
+
 	if( Ms == 1000 )
 	{
 		Ms = 0;
@@ -241,8 +258,14 @@ __interrupt void Timer_A (void)
 	{
 		//kill motor!
 		//beep!
+		SetDac( 0 );
 		YELLOW_ON;
-
+		//Buzz = TRUE;
+	}
+	else
+	{
+		//Buzz = FALSE;
+		BUZZ_OFF;
 	}
 
 }
@@ -256,7 +279,7 @@ __interrupt void Timer_A (void)
 */
 bool CmdInProgress = FALSE;
 U8 SerialByteIndex = 0;
-U8 CmdRxBuffer[3];
+U8 CmdRxBuffer[4];
 
 #define CMD_SET_SPEED	0x01 //length 3
 #define CMD_SET_DIR		0x02 //length 2
@@ -295,6 +318,7 @@ __interrupt void USCI0RX_ISR(void)
 	switch(CmdRxBuffer[0])
 	{
 	case CMD_SET_SPEED:
+		WatchDogCounter = 0; //reset watchdog.
 		if( (CmdRxBuffer[1] == 0 ) && (CmdRxBuffer[2] == 0) )
 		{
 			RED_OFF;
@@ -306,6 +330,7 @@ __interrupt void USCI0RX_ISR(void)
 		SetDac( (U16)CmdRxBuffer[1] << 8 | CmdRxBuffer[2] );
 		break;
 	case CMD_SET_DIR:
+		WatchDogCounter = 0; //reset watchdog.
 		SetDirection( CmdRxBuffer[1] );
 		break;
 	case CMD_GET_TEMP:
@@ -317,6 +342,7 @@ __interrupt void USCI0RX_ISR(void)
 		WriteWordSerial(temp);
 		break;
 	case CMD_SET_KEY:
+		WatchDogCounter = 0; //reset watchdog.
 		if( CmdRxBuffer[1] == 0x55 )
 		{
 			KEY_ON;

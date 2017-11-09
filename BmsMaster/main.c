@@ -9,7 +9,7 @@
  */
 //MSP430F2272
 
-typedef struct //about 83 bytes.
+typedef struct //about 83+8 bytes.
 {
 	U16 CellVoltages[CELL_COUNT];
 	U16 CellTemperatures[ CELL_COUNT ];
@@ -22,6 +22,7 @@ typedef struct //about 83 bytes.
 	U16 MasterHumidity;
 	U16 ValidCellReadCount;
 	U8	CriticalFlags;
+	S64 CoulombCount;
 } ReadDataStruct;
 
 typedef struct //about 42 bytes.
@@ -46,6 +47,9 @@ bool BmsAbortWatchdog = FALSE;
 U16 IdlePeriodCounterS = 0;
 U16 PcIdlePeriodCounterS = 0;
 U8 CriticalConditionFlags = 0;
+U16 InitialMasterCurrent = 0;
+U16 InitialChargeCurrent = 0;
+bool FirstCurrentMeasurement = TRUE;
 
 void InitStructs( ReadDataStruct* read_data, WriteDataStruct* write_data );
 void MainUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data );
@@ -65,9 +69,6 @@ void SetPrecharge( WriteDataStruct* write_data );
 void DelayMs(U16 ms);
 
 int main(void) {
-	//U16 adc_test = 0;
-	//U16 adc_chan = 0;
-	U8 i;
     WDTCTL = WDTPW | WDTHOLD;	// Stop watchdog timer
 
     //setup clock for 16MHz.
@@ -131,6 +132,8 @@ int main(void) {
 
     __bis_SR_register( GIE );
 
+	DelayMs( 500 );
+	
     while(1)
     {
     	MainUpdate( &ReadData, &WriteData );
@@ -156,6 +159,7 @@ void InitStructs( ReadDataStruct* read_data, WriteDataStruct* write_data )
 	}
 	read_data->ValidCellReadCount = 0;
 	read_data->CriticalFlags = 0;
+	read_data->CoulombCount = 0;
 
 	write_data->DisableBuzzer = FALSE;
 
@@ -176,8 +180,19 @@ void MainUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data )
 		for( i = 0; i < CELL_COUNT; ++i)
 			write_data->CellCurrents[i] = 0;
 
-		write_data->RelayStates[1] = FALSE;
-		write_data->RelayPrechargeStates[1] = FALSE;
+		//ok, the PC is not communicating.  We will do a simple charge routine.
+
+		if( CriticalConditionFlags == 0 )
+		{
+			//all systems go, charge.
+			write_data->RelayStates[1] = TRUE;
+			write_data->RelayPrechargeStates[1] = TRUE;
+		}else
+		{
+			//something's not right, don't charge.
+			write_data->RelayStates[1] = FALSE;
+			write_data->RelayPrechargeStates[1] = FALSE;
+		}
 
 		ENABLE_RX_INTERRUPT();
 	}
@@ -249,15 +264,15 @@ void LocalUpdate( ReadDataStruct* read_data, WriteDataStruct* write_data )
 	//this is where we read in all the sensors and stuff.
 
 	//fast stuff.
-	tmp_master_current = GetCurrent(1);
-	tmp_charge_current = GetCurrent(2);
+	//tmp_master_current = GetCurrent(1);
+	//tmp_charge_current = GetCurrent(2);
 	tmp_pack_voltage = GetPackVoltage();
 	tmp_master_temp = GetTemp();
 	tmp_master_humidity = GetHumidity();
 
 	DISABLE_RX_INTERRUPT();
-	read_data->MasterCurrent = tmp_master_current;
-	read_data->ChargeCurrent = tmp_charge_current;
+	//read_data->MasterCurrent = tmp_master_current;
+	//read_data->ChargeCurrent = tmp_charge_current;
 	read_data->PackVoltage = tmp_pack_voltage;
 	read_data->MasterTemperature = tmp_master_temp;
 	read_data->MasterHumidity = tmp_master_humidity;
@@ -462,7 +477,7 @@ void SetRelay( WriteDataStruct* write_data )
 	else
 		RELAY1_OFF;
 
-	if( write_data->RelayStates[1] == TRUE )
+	if( ( write_data->RelayStates[1] == TRUE ) && ( (CriticalConditionFlags & CONDITION_CRITICAL_COMS_LOST) == 0x00 ) )
 		RELAY2_ON;
 	else
 		RELAY2_OFF;
@@ -549,6 +564,10 @@ __interrupt void Timer_A (void)
 #pragma vector=TIMERB0_VECTOR
 __interrupt void Timer_B (void)
 {
+	volatile U16 tmp_master_current, tmp_charge_current;
+	volatile S32 tmp_master_current_adj;
+
+
 	DISABLE_RX_INTERRUPT();
 	Us += 1000;
 
@@ -595,13 +614,45 @@ __interrupt void Timer_B (void)
 			WatchDogCounterS -= 1;
 			if(WatchDogCounterS == 0 )
 			{
-				//the watchdog has expored. If we are in between a transmit and a RX, we need to abort it, kill the P1 IE, and set the state to idle.
+				//the watchdog has expired. If we are in between a transmit and a RX, we need to abort it, kill the P1 IE, and set the state to idle.
 
 				BmsAbortWatchdog = TRUE;
 				RxWaitExpired();
 			}
 		}
 	}
+
+
+	//read current ADC and compute count. (master current only)
+
+
+	if( Ms % 10 == 0 )
+	{
+		tmp_master_current = GetCurrent( 1 );
+		tmp_charge_current = GetCurrent( 2 );
+		
+		if( FirstCurrentMeasurement == TRUE )
+		{
+			if( Seconds > 1 )
+			{
+				InitialMasterCurrent = tmp_master_current - 32768;
+				InitialChargeCurrent = tmp_charge_current - 32768;
+				FirstCurrentMeasurement = FALSE;
+				ReadData.CoulombCount = 0;
+			}
+		}
+		
+		tmp_master_current -= InitialMasterCurrent;
+		tmp_charge_current -= InitialChargeCurrent;
+
+		ReadData.MasterCurrent = tmp_master_current;
+		ReadData.ChargeCurrent = tmp_charge_current;
+
+		//tmp_master_current_adj = tmp_master_current;
+		//tmp_master_current_adj -= 32768; //signed ADC value.
+		ReadData.CoulombCount += ( tmp_master_current - 32768 );
+	}
+
 	ENABLE_RX_INTERRUPT();
 }
 

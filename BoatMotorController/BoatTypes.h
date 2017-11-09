@@ -4,10 +4,12 @@
 typedef unsigned char U8;
 typedef unsigned int U16;
 typedef unsigned long U32;
+typedef unsigned long long U64;
 
 typedef char S8;
 typedef int S16;
 typedef long S32;
+typedef long long S64;
 
 typedef unsigned char bool;
 
